@@ -2,14 +2,19 @@ package p2p
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+
+	"github.com/flynn/noise"
 )
 
 type Peer struct {
 	conn net.Conn
+	kp   noise.DHKey
 }
 
 func (p *Peer) send(b []byte) error {
@@ -57,7 +62,7 @@ func (s *Server) Start() {
 
 	fmt.Printf("game server running on port %s\n", s.ListenAddr)
 
-	s.acceptLoop()
+	//s.acceptLoop()
 }
 
 func (s *Server) handleConn(conn net.Conn) {
@@ -75,20 +80,57 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-func (s *Server) acceptLoop() {
+func (s *Server) AcceptLoop() {
+	buffer := make([]byte, 1024)
+
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
 			panic(err)
 		}
 
-		peer := &Peer{
-			conn: conn,
+		// creating keypair and new handshake
+		kp, err := noise.DH25519.GenerateKeypair(rand.Reader)
+		if err != nil {
+			panic(err)
 		}
 
-		s.addPeer <- peer
+		noiseConfig := noise.Config{
+			CipherSuite:   noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashBLAKE2s),
+			Pattern:       noise.HandshakeXX,
+			Initiator:     false,
+			StaticKeypair: kp,
+		}
+		hs, err := noise.NewHandshakeState(noiseConfig)
+		if err != nil {
+			panic(err)
+		}
 
-		peer.send([]byte("Welcome, v0.1-alpha\n"))
+		// read bytes size from header
+		var size uint16
+		err = binary.Read(conn, binary.BigEndian, &size)
+		if err != nil {
+			return
+		}
+
+		if _, err = conn.Read(buffer); err != nil {
+			panic(err)
+		}
+
+		_, _, _, err = hs.ReadMessage(nil, buffer)
+		if err != nil {
+			return
+		}
+
+		fmt.Println("<<")
+		fmt.Printf("%v\n", buffer)
+
+		// handshake done
+		peer := &Peer{
+			conn: conn,
+			kp:   kp,
+		}
+		s.addPeer <- peer
 
 		go s.handleConn(conn)
 	}
